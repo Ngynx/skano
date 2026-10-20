@@ -1,0 +1,43 @@
+-- A record is the CODE (value + format), not an occurrence. The same code
+-- scanned N times must resolve to ONE row so queues can count quantities
+-- via UNIQUE(queue_id, record_id) instead of inserting N rows.
+--
+-- Pre-release: this schema is edited in place (no .sqm migration).
+-- Dev installs MUST be reinstalled (app DB dropped) after this change.
+CREATE TABLE scan_records (
+  id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+  raw_value TEXT NOT NULL,
+  format TEXT NOT NULL,
+  label_id INTEGER REFERENCES labels(id) ON DELETE SET NULL,
+  note TEXT,
+  created_at INTEGER NOT NULL,
+  scan_count INTEGER NOT NULL DEFAULT 0,
+  UNIQUE(raw_value, format)
+);
+
+CREATE INDEX scan_records_label_id ON scan_records(label_id);
+
+selectRecordIdAndScanCount:
+SELECT id, scan_count FROM scan_records WHERE raw_value = :raw_value AND format = :format;
+
+incrementScanCount:
+UPDATE scan_records SET scan_count = scan_count + 1 WHERE id = :id;
+
+insertRecordWithScanCount:
+INSERT INTO scan_records(raw_value, format, created_at, scan_count) VALUES (:raw_value, :format, :created_at, 1);
+
+selectRecordById:
+SELECT * FROM scan_records WHERE id = ?;
+
+updateRecordLabel:
+UPDATE scan_records SET label_id = :label_id WHERE id = :id;
+
+updateRecordNote:
+UPDATE scan_records SET note = :note WHERE id = :id;
+
+searchRecords:
+SELECT scan_records.*
+FROM scan_records
+LEFT JOIN labels ON labels.id = scan_records.label_id
+WHERE scan_records.raw_value LIKE '%' || :query || '%'
+   OR labels.name LIKE '%' || :query || '%';
