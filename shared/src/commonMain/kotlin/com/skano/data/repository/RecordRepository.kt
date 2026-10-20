@@ -8,10 +8,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 
 /**
- * Result of [RecordRepository.addScan]: the stable record id for the code
- * plus its TOTAL scan count (occurrences, not rows — the row is per code).
+ * Result of [RecordRepository.addScan]: the stable record id for the code,
+ * its TOTAL scan count (occurrences, not rows — the row is per code), and
+ * the record's current manual note so the batch panel can show an existing
+ * reference label without a second query.
  */
-data class ScanCountResult(val recordId: Long, val count: Long)
+data class ScanCountResult(val recordId: Long, val count: Long, val note: String?)
 
 /**
  * CRUD for scanned records. [format] is a plain TEXT column holding the
@@ -54,7 +56,7 @@ internal class RecordRepositoryImpl(private val database: SkanoDatabase) : Recor
                 // UPDATE/INSERT execute immediately (QueryResult<Long>); we
                 // only need the side effect, the new count is count + 1.
                 database.scanRecordsQueries.incrementScanCount(existing.id)
-                ScanCountResult(existing.id, existing.scan_count + 1L)
+                ScanCountResult(existing.id, existing.scan_count + 1L, existing.note)
             } else {
                 database.scanRecordsQueries.insertRecordWithScanCount(rawValue, format, createdAt)
                 // Do NOT trust the INSERT's QueryResult<Long> as the row id:
@@ -63,7 +65,7 @@ internal class RecordRepositoryImpl(private val database: SkanoDatabase) : Recor
                 val created = database.scanRecordsQueries
                     .selectRecordIdAndScanCount(rawValue, format)
                     .executeAsOne()
-                ScanCountResult(created.id, 1L)
+                ScanCountResult(created.id, 1L, created.note)
             }
         }
 
