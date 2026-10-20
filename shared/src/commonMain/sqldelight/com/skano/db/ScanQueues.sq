@@ -1,0 +1,29 @@
+CREATE TABLE scan_queues (
+  id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  created_at INTEGER NOT NULL
+);
+
+insertQueue:
+INSERT INTO scan_queues(name, created_at) VALUES (?, ?);
+
+renameQueue:
+UPDATE scan_queues SET name = ? WHERE id = ?;
+
+deleteQueue:
+DELETE FROM scan_queues WHERE id = ?;
+
+selectQueuesWithCounts:
+SELECT
+  scan_queues.id AS id,
+  scan_queues.name AS name,
+  scan_queues.created_at AS created_at,
+  COUNT(queue_entries.id) AS entry_count,
+  CAST(COALESCE(SUM(queue_entries.quantity), 0) AS INTEGER) AS total_quantity
+FROM scan_queues
+LEFT JOIN queue_entries ON queue_entries.queue_id = scan_queues.id
+GROUP BY scan_queues.id
+ORDER BY scan_queues.name;
+
+selectLastInsertId:
+SELECT last_insert_rowid();

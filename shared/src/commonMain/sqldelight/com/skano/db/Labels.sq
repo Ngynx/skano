@@ -1,0 +1,19 @@
+CREATE TABLE labels (
+  id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE
+);
+
+insertLabel:
+INSERT INTO labels(name) VALUES (?);
+
+updateLabel:
+UPDATE labels SET name = ? WHERE id = ?;
+
+deleteLabel:
+DELETE FROM labels WHERE id = ?;
+
+selectAllLabels:
+SELECT * FROM labels ORDER BY name;
+
+selectLastInsertId:
+SELECT last_insert_rowid();
