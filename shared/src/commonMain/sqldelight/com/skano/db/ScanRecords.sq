@@ -18,7 +18,7 @@ CREATE TABLE scan_records (
 CREATE INDEX scan_records_label_id ON scan_records(label_id);
 
 selectRecordIdAndScanCount:
-SELECT id, scan_count FROM scan_records WHERE raw_value = :raw_value AND format = :format;
+SELECT id, scan_count, note FROM scan_records WHERE raw_value = :raw_value AND format = :format;
 
 incrementScanCount:
 UPDATE scan_records SET scan_count = scan_count + 1 WHERE id = :id;

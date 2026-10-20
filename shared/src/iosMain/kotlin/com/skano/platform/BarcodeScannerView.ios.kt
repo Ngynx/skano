@@ -35,15 +35,24 @@ import platform.AVFoundation.AVMetadataObjectTypeUPCECode
 import platform.AVFoundation.authorizationStatusForMediaType
 import platform.AVFoundation.defaultDeviceWithDeviceType
 import platform.CoreGraphics.CGRect
+import platform.CoreGraphics.CGRectGetHeight
+import platform.CoreGraphics.CGRectGetWidth
 import platform.CoreGraphics.CGRectMake
+import platform.QuartzCore.CABasicAnimation
+import platform.QuartzCore.CAShapeLayer
 import platform.QuartzCore.CATransaction
 import platform.darwin.DISPATCH_QUEUE_PRIORITY_DEFAULT
+import platform.darwin.DISPATCH_TIME_NOW
 import platform.darwin.NSObject
+import platform.darwin.dispatch_after
 import platform.darwin.dispatch_async
 import platform.darwin.dispatch_get_global_queue
 import platform.darwin.dispatch_get_main_queue
 import platform.darwin.dispatch_queue_create
 import platform.darwin.dispatch_queue_t
+import platform.darwin.dispatch_time
+import platform.UIKit.UIBezierPath
+import platform.UIKit.UIColor
 import platform.UIKit.UIView
 import kotlin.concurrent.Volatile
 
@@ -78,6 +87,12 @@ import kotlin.concurrent.Volatile
  *   `captureOutput` takes `didOutputMetadataObjects: List<*>`; the setter is
  *   `setMetadataObjectsDelegate(objectsDelegate, queue)` (member, not import).
  * - `session.isRunning` is a FUNCTION (`isRunning()`), not a property.
+ * - Overlay: `previewLayer.transformedMetadataObjectForMetadataObject(barcode)`
+ *   imports as a MEMBER function returning `AVMetadataObject?` (cast it);
+ *   factories are companions — `UIBezierPath.bezierPathWithRoundedRect(rect,
+ *   cornerRadius)`, `UIColor.whiteColor()`, `CABasicAnimation.animationWithKeyPath`
+ *   — with uppercase properties (`CGPath`, `CGColor`); GCD timing is
+ *   `dispatch_after(dispatch_time(DISPATCH_TIME_NOW, ns), dispatch_get_main_queue())`.
  * - GCD: `dispatch_async(dispatch_get_main_queue()) {}`,
  *   `dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT.toLong(), 0u)`,
  *   `dispatch_queue_create(label, null)`.
@@ -111,6 +126,9 @@ actual fun BarcodeScannerView(
 
 /** When true, each detection prints one line — for manual on-device testing only. */
 private const val DEBUG_LOG_DETECTIONS = true
+
+/** How long a detection rect stays fully opaque before the fade starts (nanoseconds). */
+private const val OVERLAY_HOLD_NS = 1_200_000_000L
 
 /**
  * Host UIView that keeps [ScannerPipeline]'s preview layer glued to the view
@@ -146,6 +164,22 @@ private class ScannerPipeline(
     private val output = AVCaptureMetadataOutput()
     private var cameraInput: AVCaptureDeviceInput? = null
     private val previewLayer = AVCaptureVideoPreviewLayer(session = session)
+
+    /**
+     * Detection rectangle drawn ABOVE [previewLayer] (added after it, so it
+     * sits on top of the camera image). Frame is kept equal to the view bounds,
+     * so layer-space rects from `transformedMetadataObjectForMetadataObject`
+     * are already in view coordinates.
+     */
+    private val overlayLayer = CAShapeLayer()
+
+    /**
+     * Monotonic "show generation": every show() bumps it, and the hold timer
+     * only fades if its captured generation is still current — a stale timer
+     * can therefore never hide a freshly shown rect (main thread only).
+     */
+    private var overlayGeneration: Int = 0
+
     private val metadataQueue: dispatch_queue_t =
         dispatch_queue_create("com.skano.scanner.metadata", null)
 
@@ -169,6 +203,11 @@ private class ScannerPipeline(
 
     init {
         previewLayer.videoGravity = AVLayerVideoGravityResizeAspectFill
+        // Stroke + very light fill; hidden until the first detection shows it.
+        overlayLayer.lineWidth = 2.5
+        overlayLayer.strokeColor = UIColor.whiteColor().CGColor
+        overlayLayer.fillColor = UIColor.whiteColor().colorWithAlphaComponent(0.15).CGColor
+        overlayLayer.opacity = 0f
     }
 
     private fun configure(formats: Set<CodeFormat>): Boolean {
@@ -230,15 +269,71 @@ private class ScannerPipeline(
         }
     }
 
-    /** Hosts the preview as a plain sublayer — no UIView subclassing. */
+    /** Hosts the preview as a plain sublayer, with the overlay ABOVE it. */
     fun attachPreviewTo(view: UIView) {
         previewLayer.frame = view.bounds
         previewLayer.connection?.videoOrientation = AVCaptureVideoOrientationPortrait
         view.layer.addSublayer(previewLayer)
+        overlayLayer.frame = view.bounds
+        view.layer.addSublayer(overlayLayer)
     }
 
     fun updatePreviewFrame(frame: CValue<CGRect>) {
         previewLayer.frame = frame
+        // Actions disabled: the overlay must track the view without a stray
+        // implicit position animation (rect coords are view-space).
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        overlayLayer.frame = frame
+        CATransaction.commit()
+    }
+
+    /**
+     * Shows [barcode]'s layer-space rect on [overlayLayer], holds it for
+     * [OVERLAY_HOLD_NS], then fades it out over 0.8s. MAIN thread only — the
+     * transform reads previewLayer geometry. A new detection at any moment
+     * cancels the pending fade (removeAllAnimations + opacity reset) and
+     * invalidates any stale hold timer via [overlayGeneration]. Zero-size view
+     * or rect ⇒ skip silently; the detection is still delivered by [emit].
+     */
+    fun showOverlay(barcode: AVMetadataMachineReadableCodeObject) {
+        if (released) return
+        // Layer space == view space because previewLayer.frame == view.bounds.
+        val transformed = previewLayer.transformedMetadataObjectForMetadataObject(barcode)
+            as? AVMetadataMachineReadableCodeObject
+        val rect = transformed?.bounds ?: return
+        if (CGRectGetWidth(overlayLayer.frame) <= 0.0 ||
+            CGRectGetHeight(overlayLayer.frame) <= 0.0
+        ) {
+            return
+        }
+        if (CGRectGetWidth(rect) <= 0.0 || CGRectGetHeight(rect) <= 0.0) return
+
+        overlayGeneration += 1
+        val generation = overlayGeneration
+
+        overlayLayer.removeAllAnimations()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        overlayLayer.path =
+            UIBezierPath.bezierPathWithRoundedRect(rect, cornerRadius = 0.0).CGPath
+        overlayLayer.opacity = 1f
+        CATransaction.commit()
+
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, OVERLAY_HOLD_NS), dispatch_get_main_queue()) {
+            // A newer show() owns the rect now, or the pipeline is gone.
+            if (released || generation != overlayGeneration) return@dispatch_after
+            // Model value first (actions disabled) so the final state is 0.
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            overlayLayer.opacity = 0f
+            CATransaction.commit()
+            val fade = CABasicAnimation.animationWithKeyPath("opacity")
+            fade.fromValue = 1.0
+            fade.toValue = 0.0
+            fade.duration = 0.8
+            overlayLayer.addAnimation(fade, forKey = "overlayFade")
+        }
     }
 
     fun emit(value: String, format: CodeFormat) {
@@ -266,9 +361,14 @@ private class MetadataDelegate(
             as? AVMetadataMachineReadableCodeObject ?: return
         val value = barcode.stringValue?.takeIf { it.isNotBlank() } ?: return
         val format = barcode.type.toCodeFormat()
-        // Contract: onDetected always fires on the main thread.
+        // Contract: onDetected always fires on the main thread. The raw
+        // barcode object rides along so the overlay can be transformed there
+        // (previewLayer geometry is main-only).
         dispatch_async(dispatch_get_main_queue()) {
-            if (!pipeline.released) pipeline.emit(value, format)
+            if (!pipeline.released) {
+                pipeline.showOverlay(barcode)
+                pipeline.emit(value, format)
+            }
         }
     }
 }
